@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Student Management System</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">SM</span>
+      <div>
+        <h1>Student Management</h1>
+        <p>Records, search and analytics</p>
+      </div>
+    </div>
+    <button class="btn primary" id="addBtn">Add student</button>
+  </header>
+
+  <main>
+    <section class="kpis" aria-label="Summary">
+      <div class="kpi"><span id="kTotal">0</span><label>Students</label></div>
+      <div class="kpi"><span id="kAvg">0</span><label>Average GPA</label></div>
+      <div class="kpi"><span id="kDept">0</span><label>Departments</label></div>
+      <div class="kpi"><span id="kTop">-</span><label>Top GPA</label></div>
+    </section>
+
+    <section class="charts" aria-label="Charts">
+      <div class="panel"><h2>Students by department</h2><div class="chart-box"><canvas id="deptChart"></canvas></div></div>
+      <div class="panel"><h2>GPA distribution</h2><div class="chart-box"><canvas id="gpaChart"></canvas></div></div>
+      <div class="panel"><h2>Students by year</h2><div class="chart-box"><canvas id="yearChart"></canvas></div></div>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="toolbar">
+        <h2>All students</h2>
+        <div class="filters">
+          <input type="search" id="search" placeholder="Search name, roll no or email">
+          <select id="deptFilter"><option value="">All departments</option></select>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Roll no</th><th>Name</th><th>Email</th><th>Department</th><th>Year</th><th>GPA</th><th></th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <p class="empty" id="empty" hidden>No students match. Add a student or clear the filters.</p>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="modal">
+    <form id="form" method="dialog" novalidate>
+      <h2 id="modalTitle">Add student</h2>
+      <input type="hidden" id="sid">
+      <div class="grid">
+        <label>Roll number<input id="roll_no" required></label>
+        <label>Full name<input id="name" required></label>
+        <label class="wide">Email<input id="email" type="email" required></label>
+        <label>Department<input id="department" list="deptList" required></label>
+        <datalist id="deptList"></datalist>
+        <label>Year
+          <select id="year"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        </label>
+        <label>GPA (0-10)<input id="gpa" type="number" step="0.01" min="0" max="10" required></label>
+      </div>
+      <p class="error" id="formError" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="cancelBtn">Cancel</button>
+        <button type="submit" class="btn primary">Save student</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const api = '/api/students';
+    const colors = ['#0f766e', '#2563eb', '#d97706', '#7c3aed', '#be123c', '#475569'];
+    const FIELDS = ['roll_no', 'name', 'email', 'department', 'year', 'gpa'];
+    let charts = {};
+    let current = [];
+
+    async function request(url, method = 'GET', body) {
+      const res = await fetch(url, {
+        method, headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+      return data;
+    }
+
+    function toast(msg) {
+      const t = $('toast'); t.textContent = msg; t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2500);
+    }
+
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+    async function loadStudents() {
+      const params = new URLSearchParams({ q: $('search').value, department: $('deptFilter').value });
+      current = await request(`${api}?${params}`);
+      $('rows').innerHTML = current.map(s => `
+        <tr>
+          <td>${esc(s.roll_no)}</td><td>${esc(s.name)}</td><td>${esc(s.email)}</td>
+          <td>${esc(s.department)}</td><td>${s.year}</td>
+          <td><span class="gpa ${s.gpa >= 8 ? 'hi' : s.gpa >= 6.5 ? 'mid' : 'lo'}">${s.gpa.toFixed(2)}</span></td>
+          <td class="row-actions">
+            <button class="link" data-edit="${s.id}">Edit</button>
+            <button class="link danger" data-del="${s.id}">Delete</button>
+          </td>
+        </tr>`).join('');
+      $('empty').hidden = current.length > 0;
+    }
+
+    function draw(key, canvasId, config) {
+      if (charts[key]) charts[key].destroy();
+      charts[key] = new Chart($(canvasId), config);
+    }
+
+    async function loadStats() {
+      const s = await request('/api/stats');
+      $('kTotal').textContent = s.total;
+      $('kAvg').textContent = s.avg_gpa.toFixed(2);
+      $('kDept').textContent = s.departments;
+      $('kTop').textContent = s.top_student ? s.top_student.gpa.toFixed(2) : '-';
+      $('kTop').title = s.top_student ? s.top_student.name : '';
+
+      const depts = s.by_department.map(d => d.department);
+      const selected = $('deptFilter').value;
+      $('deptFilter').innerHTML = '<option value="">All departments</option>' +
+        depts.map(d => `<option ${d === selected ? 'selected' : ''}>${esc(d)}</option>`).join('');
+      $('deptList').innerHTML = depts.map(d => `<option value="${esc(d)}">`).join('');
+
+      const opts = { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
+      const yAxis = { y: { beginAtZero: true, ticks: { precision: 0 } } };
+      draw('dept', 'deptChart', {
+        type: 'bar',
+        data: { labels: depts, datasets: [{ data: s.by_department.map(d => d.count), backgroundColor: colors[0], borderRadius: 4 }] },
+        options: { ...opts, scales: yAxis }
+      });
+      draw('gpa', 'gpaChart', {
+        type: 'doughnut',
+        data: { labels: ['9-10', '8-9', '7-8', '6-7', 'Below 6'],
+                datasets: [{ data: s.gpa_bands, backgroundColor: colors.slice(0, 5), borderWidth: 2 }] },
+        options: { ...opts, plugins: { legend: { display: true, position: 'right' } } }
+      });
+      draw('year', 'yearChart', {
+        type: 'bar',
+        data: { labels: s.by_year.map(y => 'Year ' + y.year),
+                datasets: [{ data: s.by_year.map(y => y.count), backgroundColor: colors[1], borderRadius: 4 }] },
+        options: { ...opts, scales: yAxis }
+      });
+    }
+
+    const refresh = () => Promise.all([loadStudents(), loadStats()]);
+
+    function openModal(s) {
+      $('form').reset(); $('formError').textContent = '';
+      $('modalTitle').textContent = s ? 'Edit student' : 'Add student';
+      $('sid').value = s ? s.id : '';
+      if (s) FIELDS.forEach(k => $(k).value = s[k]);
+      $('modal').showModal();
+    }
+
+    $('rows').addEventListener('click', async e => {
+      const edit = e.target.dataset.edit, del = e.target.dataset.del;
+      if (edit) openModal(current.find(s => s.id == edit));
+      if (del) {
+        const s = current.find(x => x.id == del);
+        if (!confirm(`Delete ${s.name}? This cannot be undone.`)) return;
+        try { await request(`${api}/${del}`, 'DELETE'); toast('Student deleted'); refresh(); }
+        catch (err) { toast(err.message); }
+      }
+    });
+
+    $('addBtn').onclick = () => openModal();
+    $('cancelBtn').onclick = () => $('modal').close();
+    $('form').onsubmit = async e => {
+      e.preventDefault();
+      const id = $('sid').value;
+      const body = Object.fromEntries(FIELDS.map(k => [k, $(k).value]));
+      try {
+        await request(id ? `${api}/${id}` : api, id ? 'PUT' : 'POST', body);
+        $('modal').close(); toast(id ? 'Student updated' : 'Student added'); refresh();
+      } catch (err) { $('formError').textContent = err.message; }
+    };
+
+    let timer;
+    $('search').oninput = () => { clearTimeout(timer); timer = setTimeout(loadStudents, 250); };
+    $('deptFilter').onchange = loadStudents;
+    refresh();
+  </script>
+</body>
+</html>
